@@ -8,15 +8,16 @@ import os
 import subprocess
 import ffmpeg
 
-# タグとカバーアート用のライブラリ群（工事中）
-# from io import BytesIO
-# from PIL import Image
-# from mutagen.easyid3 import EasyID3
-# from mutagen.mp3 import MP3
-# from mutagen.flac import FLAC
+# タグとカバーアート用のライブラリ群
+from io import BytesIO
+from PIL import Image
+from mutagen.easyid3 import EasyID3
+from mutagen.id3 import ID3
+from mutagen.flac import FLAC
+from mutagen.oggopus import OggOpus
 
 
-TARGET_FILE_TYPE = [".flac","mp3"]
+TARGET_FILE_TYPE = [".flac",".mp3"]
 OPUS_EXT = ".opus"
 WAV_EXT = ".wav"
 
@@ -76,6 +77,68 @@ def file_pass_check():
         print(f"input file pass:{list[0]}")
         print(f"output file pass:{list[1]}")
         print(f"wav file pass:{list[2]}")
+        
+def export_coverart_img_and_tags(input_file_pass):
+    """
+    入力ファイルのカバーアートとタグを抽出して返す関数
+    出力はtags(辞書形式)とカバーアートのタプル
+    Args:
+        input_file_pass (str): 入力ファイルのパス
+    """
+    filename, ext = os.path.splitext(input_file_pass)
+    coverart_img = None
+    
+    if ext == ".flac":
+        tags_dict = FLAC(input_file_pass)
+        if tags_dict is not None:
+            print("FLACのタグの抽出に成功しました")
+        else:
+            print("FLACのタグ情報がありません")
+        images = tags_dict.pictures
+        if images is not None:
+            for i, picture in enumerate(images):
+                try:
+                    if i == 0:
+                        coverart_img = Image.open(BytesIO(picture.data))
+                        print(f"FLACのカバーアートの抽出に成功しました")
+                except IOError:
+                    print(f"FLACのカバーアートの抽出に失敗しました")
+    elif ext ==".mp3":
+        id3_temp = ID3(input_file_pass)
+        tags_dict = EasyID3(input_file_pass)
+        
+        if tags_dict is not None:
+            print("MP3のタグの抽出に成功しました")
+        else:
+            print("MP3のタグ情報がありません")
+        
+        apic = id3_temp.get("APIC:")
+        if apic is not None:
+            coverart_img = Image.open(BytesIO(apic.data))
+            print("MP3カバーアートの抽出成功")
+        else:
+            print("MP3カバーアートが見つかりませんでした")
+                
+    return tags_dict, coverart_img
+
+def insert_tags(opus_insert_file, tags):
+    """
+    入力Opusファイルにタグとカバーアートを書き込む
+    出力は入力ファイルへの上書き
+    Args:
+        opus_insert_file (str): 入力Opusファイルのパス
+        (tags, coverart_img):タグ、カバーアートのタプル
+    """
+    insert_file = OggOpus(opus_insert_file)
+    
+    # タグを埋め込む
+    for key, value in tags.items():
+        insert_file[key] = value
+    
+    # ファイルの上書き
+    insert_file.save()
+    
+    
     
 def convert_opus():
     # 一度すべてWAVファイルに変換する
@@ -84,39 +147,32 @@ def convert_opus():
         output_file = file_pass[1]
         wav_file = file_pass[2]
         
-        # ファイルの種類別にタグとカバーアートを取得
-        # タグ情報は埋め込みが難しいので工事中　2024/09/11
+        abs_jpeg_pass = None
         
-        # filename, ext = os.path.splitext(input_file)
-        # if ext == ".flac":
-        #     tags = FLAC(input_file)
-        #     apic = tags.pictures
-        #     for picture in apic:
-        #         try:
-        #             cover_img = Image.open(BytesIO(picture.data))
-        #         except IOError:
-        #             print("Error opening image")
-        # elif ext == ".mp3":
-        #     tags = MP3(input_file)
-        #     apic = tags.pictures
-        #     for picture in apic:
-        #         try:
-        #             cover_img = Image.open(BytesIO(picture.data))
-        #         except IOError:
-        #             print("Error opening image")
+        # ファイルの種類別にタグとカバーアートを取得
+        tags, coverart_img = export_coverart_img_and_tags(input_file)
+        # カバーアートを中間ファイルに保存
+        abs_jpeg_pass = os.path.join(input_dir_root_pass, "temp.jpg")
+        if coverart_img is not None:
+            coverart_img.save(abs_jpeg_pass, quality=95)
         
         stream = ffmpeg.input(input_file)
         stream = ffmpeg.output(stream, wav_file)
         ffmpeg.run(stream, quiet=True)          # コンソール表示をOFFのまま変換を実行
         
-        subpro_opus(wav_file,output_file, bitrate)
+        subpro_opus(wav_file, output_file, bitrate, abs_jpeg_pass)
         
         # 生成した中間ファイルのWAVファイルを削除
         if os.path.exists(wav_file):
             os.remove(wav_file)
+        # 生成した中間ファイルのtemp.jpegを削除
+        if os.path.exists(abs_jpeg_pass):
+            os.remove(abs_jpeg_pass)
+            
+        insert_tags(output_file, tags)
         
         
-def subpro_opus(input_wav, output_opus, bitrate="96k"):
+def subpro_opus(input_wav, output_opus, bitrate="96k", picture_pass = None):
     """
     Wave, AIFF, FLAC, Ogg/FLAC, or raw PCM ファイルを opus ファイルに変換する関数
 
@@ -124,10 +180,14 @@ def subpro_opus(input_wav, output_opus, bitrate="96k"):
         input_wav (str): 入力 wav ファイルのパス
         output_opus (str): 出力 opus ファイルのパス
         bitrate (str, optional): ビットレート. Defaults to "96k".
+        picture_pass : 入力カバーアートのパス
     """
 
     # opusenc コマンドの作成
-    command = ["opusenc", input_wav, output_opus, "--bitrate", bitrate]
+    if os.path.exists(picture_pass):
+        command = ["opusenc", input_wav, output_opus, "--bitrate", bitrate, "--picture", picture_pass]
+    else:
+        command = ["opusenc", input_wav, output_opus, "--bitrate", bitrate]
 
     # コマンドの実行
     try:
@@ -140,6 +200,7 @@ def main():
     copy_directory(input_dir_pass, output_dir_pass)
     # file_pass_check()
     convert_opus()
+    print("すべての処理が完了しました")
     
     
 if __name__ == "__main__" :
