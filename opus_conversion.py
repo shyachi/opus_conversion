@@ -5,9 +5,12 @@
 # ffmpeg.exe : 様々な音楽ファイルをwavに変換し、opusenc.exeに渡すために必要です
 
 import os
+from os.path import expanduser
 import subprocess
 import ffmpeg
 from tqdm import tqdm
+import tkinter
+from tkinter import filedialog
 
 # タグとカバーアート用のライブラリ群
 from io import BytesIO
@@ -23,10 +26,10 @@ OPUS_EXT = ".opus"
 WAV_EXT = ".wav"
 
 # 入力するディレクトリーのパスと、その上のディレクトリーの名前を取得
-input_dir_pass = "music_input"
+input_dir_pass = ""
 input_dir_root_pass = os.path.abspath(os.path.dirname(input_dir_pass))
 # 出力するディレクトリーのパスと、その上のディレクトリーの名前を取得
-output_dir_pass = "music_output"
+output_dir_pass = ""
 output_dir_root_pass = os.path.abspath(os.path.dirname(output_dir_pass))
 
 # ファイルパスのリスト
@@ -203,14 +206,32 @@ def subpro_opus(input_wav, output_opus, bitrate="96", picture_pass = None):
         print(f"エラーが発生しました: {e}")
 
 def main():
-    print("Opusへの変換を開始します")
-    copy_directory(input_dir_pass, output_dir_pass)
-    print(f"変換するファイルの合計：{len(file_pass_list)}")
-    go_check = input("本当に変換しますか？実行するなら y を入力してください：")
-    if go_check == "y":
-        # file_pass_check()
-        convert_opus()
-        print("すべての処理が完了しました")
+    print("Opus変換プログラムへようこそ")
+    input_check = input("入力するフォルダーを選択してください。続けるなら y を入力してください：")
+    if input_check == "y":
+        idir = os.path.abspath(expanduser("~"))
+        input_dir_pass = tkinter.filedialog.askdirectory(initialdir = idir)
+        if input_dir_pass:
+            output_check = input("出力するフォルダーを選択してください。続けるなら y を入力してください：")
+            if output_check == "y":
+                output_dir_pass = tkinter.filedialog.askdirectory(initialdir = idir)
+                if output_dir_pass:
+                    print("Opusへの変換を開始します")
+                    copy_directory(input_dir_pass, output_dir_pass)
+                    print(f"変換するファイルの合計：{len(file_pass_list)}")
+                    go_check = input("本当に変換しますか？実行するなら y を入力してください：")
+                    if go_check == "y":
+                        # file_pass_check()
+                        convert_opus()
+                        print("すべての処理が完了しました")
+                    else:
+                        print("変換を中止しました")
+                else:
+                    print("出力フォルダーが選択されませんでした")
+            else:
+                print("変換を中止しました")
+        else:
+            print("入力フォルダーが選択されませんでした")
     else:
         print("変換を中止しました")
     
