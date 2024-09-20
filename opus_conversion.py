@@ -7,6 +7,7 @@
 import os
 import subprocess
 import ffmpeg
+from tqdm import tqdm
 
 # タグとカバーアート用のライブラリ群
 from io import BytesIO
@@ -32,7 +33,7 @@ output_dir_root_pass = os.path.abspath(os.path.dirname(output_dir_pass))
 # (input_file_pass, output_file_pass, wav_file_pass)のタプルを入れる
 file_pass_list = []
 
-bitrate = "96k"
+bitrate = "96"
 
 
 def copy_directory(src, dst):
@@ -90,34 +91,34 @@ def export_coverart_img_and_tags(input_file_pass):
     
     if ext == ".flac":
         tags_dict = FLAC(input_file_pass)
-        if tags_dict is not None:
-            print("FLACのタグの抽出に成功しました")
-        else:
-            print("FLACのタグ情報がありません")
+        # if tags_dict is not None:
+        #     print("FLACのタグの抽出に成功しました")
+        # else:
+        #     print("FLACのタグ情報がありません")
         images = tags_dict.pictures
         if images is not None:
             for i, picture in enumerate(images):
                 try:
                     if i == 0:
                         coverart_img = Image.open(BytesIO(picture.data))
-                        print(f"FLACのカバーアートの抽出に成功しました")
+                        # print(f"FLACのカバーアートの抽出に成功しました")
                 except IOError:
                     print(f"FLACのカバーアートの抽出に失敗しました")
     elif ext ==".mp3":
         id3_temp = ID3(input_file_pass)
         tags_dict = EasyID3(input_file_pass)
         
-        if tags_dict is not None:
-            print("MP3のタグの抽出に成功しました")
-        else:
-            print("MP3のタグ情報がありません")
+        # if tags_dict is not None:
+        #     print("MP3のタグの抽出に成功しました")
+        # else:
+        #     print("MP3のタグ情報がありません")
         
         apic = id3_temp.get("APIC:")
         if apic is not None:
             coverart_img = Image.open(BytesIO(apic.data))
-            print("MP3カバーアートの抽出成功")
-        else:
-            print("MP3カバーアートが見つかりませんでした")
+            # print("MP3カバーアートの抽出成功")
+        # else:
+        #     print("MP3カバーアートが見つかりませんでした")
                 
     return tags_dict, coverart_img
 
@@ -142,65 +143,76 @@ def insert_tags(opus_insert_file, tags):
     
 def convert_opus():
     # 一度すべてWAVファイルに変換する
-    for file_pass in file_pass_list:
-        input_file = file_pass[0]
-        output_file = file_pass[1]
-        wav_file = file_pass[2]
-        
-        abs_jpeg_pass = None
-        
-        # ファイルの種類別にタグとカバーアートを取得
-        tags, coverart_img = export_coverart_img_and_tags(input_file)
-        # カバーアートを中間ファイルに保存
-        abs_jpeg_pass = os.path.join(input_dir_root_pass, "temp.jpg")
-        if coverart_img is not None:
-            coverart_img.save(abs_jpeg_pass, quality=95)
-        
-        stream = ffmpeg.input(input_file)
-        stream = ffmpeg.output(stream, wav_file)
-        ffmpeg.run(stream, quiet=True)          # コンソール表示をOFFのまま変換を実行
-        
-        subpro_opus(wav_file, output_file, bitrate, abs_jpeg_pass)
-        
-        # 生成した中間ファイルのWAVファイルを削除
-        if os.path.exists(wav_file):
-            os.remove(wav_file)
-        # 生成した中間ファイルのtemp.jpegを削除
-        if os.path.exists(abs_jpeg_pass):
-            os.remove(abs_jpeg_pass)
+    with tqdm(total=len(file_pass_list), desc="ファイルの進捗状況") as pbar:
+        for file_pass in file_pass_list:
+            input_file = file_pass[0]
+            output_file = file_pass[1]
+            wav_file = file_pass[2]
             
-        insert_tags(output_file, tags)
+            pbar.set_description(f"現在処理中のファイル：{input_file}")
+            
+            abs_jpeg_pass = None
+            
+            # ファイルの種類別にタグとカバーアートを取得
+            tags, coverart_img = export_coverart_img_and_tags(input_file)
+            # カバーアートを中間ファイルに保存
+            abs_jpeg_pass = os.path.join(input_dir_root_pass, "temp.jpg")
+            if coverart_img is not None:
+                coverart_img.save(abs_jpeg_pass, quality=95)
+            
+            # インプットファイルを、メタデータとカバーアートを無視してPCM16bitに変換する
+            # コンソール表示はOFFで実行
+            ffmpeg.input(input_file).output(wav_file, map_metadata='-1', acodec='pcm_s16le', vn=None).run(quiet=True)
+            
+            subpro_opus(wav_file, output_file, bitrate, abs_jpeg_pass)
+            
+            # 生成した中間ファイルのWAVファイルを削除
+            if os.path.exists(wav_file):
+                os.remove(wav_file)
+            # 生成した中間ファイルのtemp.jpegを削除
+            if os.path.exists(abs_jpeg_pass):
+                os.remove(abs_jpeg_pass)
+                
+            insert_tags(output_file, tags)
+            
+            # プログレスバーを進める
+            pbar.update(1)
         
         
-def subpro_opus(input_wav, output_opus, bitrate="96k", picture_pass = None):
+def subpro_opus(input_wav, output_opus, bitrate="96", picture_pass = None):
     """
     Wave, AIFF, FLAC, Ogg/FLAC, or raw PCM ファイルを opus ファイルに変換する関数
 
     Args:
         input_wav (str): 入力 wav ファイルのパス
         output_opus (str): 出力 opus ファイルのパス
-        bitrate (str, optional): ビットレート. Defaults to "96k".
+        bitrate (str, optional): ビットレート. Defaults to "96".
         picture_pass : 入力カバーアートのパス
     """
 
     # opusenc コマンドの作成
     if os.path.exists(picture_pass):
-        command = ["opusenc", input_wav, output_opus, "--bitrate", bitrate, "--picture", picture_pass]
+        command = ["opusenc.exe", "--bitrate", bitrate, "--quiet", "--picture", picture_pass, input_wav, output_opus]
     else:
-        command = ["opusenc", input_wav, output_opus, "--bitrate", bitrate]
+        command = ["opusenc.exe", "--bitrate", bitrate, "--quiet", input_wav, output_opus]
 
     # コマンドの実行
     try:
-        subprocess.run(command, check=True)
-        print(f"変換が完了しました: {input_wav} -> {output_opus}")
+        subprocess.run(command, stderr=subprocess.DEVNULL, check=True)
     except subprocess.CalledProcessError as e:
         print(f"エラーが発生しました: {e}")
 
 def main():
+    print("Opusへの変換を開始します")
     copy_directory(input_dir_pass, output_dir_pass)
-    # file_pass_check()
-    convert_opus()
-    print("すべての処理が完了しました")
+    print(f"変換するファイルの合計：{len(file_pass_list)}")
+    go_check = input("本当に変換しますか？実行するなら y を入力してください：")
+    if go_check == "y":
+        # file_pass_check()
+        convert_opus()
+        print("すべての処理が完了しました")
+    else:
+        print("変換を中止しました")
     
     
 if __name__ == "__main__" :
