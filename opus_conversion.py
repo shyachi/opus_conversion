@@ -11,6 +11,7 @@ import ffmpeg
 from tqdm import tqdm
 import tkinter
 from tkinter import filedialog
+import concurrent.futures
 
 # タグとカバーアート用のライブラリ群
 from io import BytesIO
@@ -24,6 +25,7 @@ from mutagen.oggopus import OggOpus
 TARGET_FILE_TYPE = [".flac",".mp3"]
 OPUS_EXT = ".opus"
 WAV_EXT = ".wav"
+JPEG_EXT = ".jpg"
 
 # 入力するディレクトリーのパスと、その上のディレクトリーの名前を取得
 input_dir_pass = ""
@@ -33,11 +35,14 @@ output_dir_pass = ""
 output_dir_root_pass = os.path.abspath(os.path.dirname(output_dir_pass))
 
 # ファイルパスのリスト
-# (input_file_pass, output_file_pass, wav_file_pass)のタプルを入れる
+# (input_file_pass, output_file_pass, wav_file_pass, jpeg_file_pass)のタプルを入れる
 file_pass_list = []
 
+# Opusビットレート指定
 bitrate = "96"
 
+# マルチスレッド数指定
+max_thread = os.cpu_count() // 2
 
 def copy_directory(src, dst):
     # この関数は、元のディレクトリー構造をコピー先に作り出します
@@ -68,19 +73,25 @@ def target_file_check(src_dir, dst_dir):
                 # 入力パスと出力パスのリストに追加
                 output_file = filename + str(OPUS_EXT)
                 wav_file = filename + str(WAV_EXT)
+                jpeg_file = filename + str(JPEG_EXT)
                 
                 abs_input_pass = os.path.join(input_dir_root_pass, os.path.join(src_dir, input_file))
                 abs_output_pass = os.path.join(output_dir_root_pass, os.path.join(dst_dir, output_file))
                 abs_wav_pass = os.path.join(output_dir_root_pass, os.path.join(dst_dir, wav_file))
+                abs_jpeg_pass = os.path.join(output_dir_root_pass, os.path.join(dst_dir, jpeg_file))
                 
-                file_pass_list.append((abs_input_pass, abs_output_pass, abs_wav_pass))
+                file_pass_list.append((abs_input_pass, abs_output_pass, abs_wav_pass, abs_jpeg_pass))
 
 def file_pass_check():
-    # 入力のターゲットのファイルパス一覧
+    """
+    ファイルパスのチェック用関数
+    Args:
+    """
     for list in file_pass_list:
         print(f"input file pass:{list[0]}")
         print(f"output file pass:{list[1]}")
         print(f"wav file pass:{list[2]}")
+        print(f"jpeg file pass:{list[3]}")
         
 def export_coverart_img_and_tags(input_file_pass):
     """
@@ -92,37 +103,26 @@ def export_coverart_img_and_tags(input_file_pass):
     filename, ext = os.path.splitext(input_file_pass)
     coverart_img = None
     
+    # tags_dict = ファイルに添付されているタグの辞書
+    
     if ext == ".flac":
         tags_dict = FLAC(input_file_pass)
-        # if tags_dict is not None:
-        #     print("FLACのタグの抽出に成功しました")
-        # else:
-        #     print("FLACのタグ情報がありません")
+        # カバーアートの取得（FLAC）
         images = tags_dict.pictures
         if images is not None:
+            # カバーアートは複数枚含まれているパターンがある
+            # 最初の一枚だけ取得する
             for i, picture in enumerate(images):
-                try:
-                    if i == 0:
-                        coverart_img = Image.open(BytesIO(picture.data))
-                        # print(f"FLACのカバーアートの抽出に成功しました")
-                except IOError:
-                    print(f"FLACのカバーアートの抽出に失敗しました")
+                if i == 0:
+                    coverart_img = Image.open(BytesIO(picture.data))
     elif ext ==".mp3":
         id3_temp = ID3(input_file_pass)
         tags_dict = EasyID3(input_file_pass)
-        
-        # if tags_dict is not None:
-        #     print("MP3のタグの抽出に成功しました")
-        # else:
-        #     print("MP3のタグ情報がありません")
-        
+        # カバーアートの取得（MP3）
         apic = id3_temp.get("APIC:")
         if apic is not None:
             coverart_img = Image.open(BytesIO(apic.data))
-            # print("MP3カバーアートの抽出成功")
-        # else:
-        #     print("MP3カバーアートが見つかりませんでした")
-                
+            
     return tags_dict, coverart_img
 
 def insert_tags(opus_insert_file, tags):
@@ -142,44 +142,54 @@ def insert_tags(opus_insert_file, tags):
     # ファイルの上書き
     insert_file.save()
     
+def convert_opus_func(file_pass):
+    """
+    マルチスレッド処理用の子スレッド関数
+    Args:
+        file_pass :  (input_file_pass, output_file_pass, wav_file_pass, jpeg_file_pass)
+    """
+    input_file = file_pass[0]
+    output_file = file_pass[1]
+    wav_file = file_pass[2]
+    jpeg_file = file_pass[3]
+                    
+    # ファイルの種類別にタグとカバーアートを取得
+    tags, coverart_img = export_coverart_img_and_tags(input_file)
+    # カバーアートを中間ファイルに保存
+    if coverart_img is not None:
+        coverart_img.save(jpeg_file, quality=95)
     
+    # インプットファイルを、メタデータとカバーアートを無視してPCM16bitに変換する
+    # コンソール表示はOFFで実行
+    ffmpeg.input(input_file).output(wav_file, map_metadata='-1', acodec='pcm_s16le', vn=None).run(quiet=True)
     
-def convert_opus():
-    # 一度すべてWAVファイルに変換する
-    with tqdm(total=len(file_pass_list), desc="ファイルの進捗状況") as pbar:
-        for file_pass in file_pass_list:
-            input_file = file_pass[0]
-            output_file = file_pass[1]
-            wav_file = file_pass[2]
-            
-            pbar.set_description(f"現在処理中のファイル：{input_file}")
-            
-            abs_jpeg_pass = None
-            
-            # ファイルの種類別にタグとカバーアートを取得
-            tags, coverart_img = export_coverart_img_and_tags(input_file)
-            # カバーアートを中間ファイルに保存
-            abs_jpeg_pass = os.path.join(input_dir_root_pass, "temp.jpg")
-            if coverart_img is not None:
-                coverart_img.save(abs_jpeg_pass, quality=95)
-            
-            # インプットファイルを、メタデータとカバーアートを無視してPCM16bitに変換する
-            # コンソール表示はOFFで実行
-            ffmpeg.input(input_file).output(wav_file, map_metadata='-1', acodec='pcm_s16le', vn=None).run(quiet=True)
-            
-            subpro_opus(wav_file, output_file, bitrate, abs_jpeg_pass)
-            
-            # 生成した中間ファイルのWAVファイルを削除
-            if os.path.exists(wav_file):
-                os.remove(wav_file)
-            # 生成した中間ファイルのtemp.jpegを削除
-            if os.path.exists(abs_jpeg_pass):
-                os.remove(abs_jpeg_pass)
-                
-            insert_tags(output_file, tags)
-            
-            # プログレスバーを進める
-            pbar.update(1)
+    # Opusに変換する
+    subpro_opus(wav_file, output_file, bitrate, jpeg_file)
+    
+    # 生成した中間ファイルのWAVファイルを削除
+    if os.path.exists(wav_file):
+        os.remove(wav_file)
+    # 生成した中間ファイルのtemp.jpegを削除
+    if os.path.exists(jpeg_file):
+        os.remove(jpeg_file)
+        
+    insert_tags(output_file, tags)
+        
+    
+def convert_opus_mt():
+    """
+    convert_opus_func()をマルチスレッドで回す
+    Args:
+        なし
+    """
+    
+    tasks = file_pass_list
+    # 指定のスレッド数のスレッドプールを作成する
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_thread) as executor:
+        # 進捗管理のためtqdmでexecutor.mapの戻り値をラップ
+        # 進捗バーの表示更新のために、空のfor分を回す
+        for _ in tqdm(executor.map(convert_opus_func, tasks), total=len(tasks), desc="ファイルの進捗状況"):
+            pass
         
         
 def subpro_opus(input_wav, output_opus, bitrate="96", picture_pass = None):
@@ -222,7 +232,7 @@ def main():
                     go_check = input("本当に変換しますか？実行するなら y を入力してください：")
                     if go_check == "y":
                         # file_pass_check()
-                        convert_opus()
+                        convert_opus_mt()
                         print("すべての処理が完了しました")
                     else:
                         print("変換を中止しました")
