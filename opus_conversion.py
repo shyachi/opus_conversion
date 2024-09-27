@@ -16,6 +16,7 @@ from queue import Empty
 import re
 from pathlib import Path, PurePath
 import signal
+import sys
 
 
 # タグとカバーアート用のライブラリ群
@@ -139,7 +140,7 @@ def write_log(write_text_list):
     
     with open(log_file_pass, mode='w', encoding="utf-8") as f:
         for text in write_text_list:
-            f.write(text + "\n")
+            f.write(str(text) + "\n")
     
     print("ログの書き出しが完了しました。")
 
@@ -200,46 +201,49 @@ def convert_opus_func(file_pass):
     Args:
         file_pass :  (input_file_pass, output_file_pass, wav_file_pass, jpeg_file_pass)
     """
-    input_file = file_pass[0]
-    output_file = file_pass[1]
-    wav_file = file_pass[2]
-    jpeg_file = file_pass[3]
+    try:    
+        input_file = file_pass[0]
+        output_file = file_pass[1]
+        wav_file = file_pass[2]
+        jpeg_file = file_pass[3]
+                        
+        # ファイルの種類別にタグとカバーアートを取得
+        tags, coverart_img = export_coverart_img_and_tags(input_file)
+        # カバーアートを中間ファイルに保存
+        if coverart_img is not None:
+            coverart_img.save(jpeg_file, quality=95)
+        
+        # インプットファイルを、メタデータとカバーアートを無視してPCM16bitに変換する
+        # コンソール表示はOFFで実行
+        ffmpeg_error = 0
+        
+        command = ["ffmpeg", "-i", input_file, wav_file, "-map_metadata", "-1", "-acodec", "pcm_s16le", "-vn"]
+        try:
+            subprocess.run(command, stderr=subprocess.DEVNULL, check=True)
+        except subprocess.CalledProcessError as e:
+            ffmpeg_error = -1
+            print("ffmpeg error:" + str(e))
+                
+        # Opusに変換する
+        if ffmpeg_error == 0:
+            subpro_result = subpro_opus(wav_file, output_file, bitrate, jpeg_file)
                     
-    # ファイルの種類別にタグとカバーアートを取得
-    tags, coverart_img = export_coverart_img_and_tags(input_file)
-    # カバーアートを中間ファイルに保存
-    if coverart_img is not None:
-        coverart_img.save(jpeg_file, quality=95)
-    
-    # インプットファイルを、メタデータとカバーアートを無視してPCM16bitに変換する
-    # コンソール表示はOFFで実行
-    ffmpeg_error = 0
-    
-    command = ["ffmpeg", "-i", input_file, wav_file, "-map_metadata", "-1", "-acodec", "pcm_s16le", "-vn"]
-    try:
-        subprocess.run(command, stderr=subprocess.DEVNULL, check=True)
-    except subprocess.CalledProcessError as e:
-        ffmpeg_error = -1
-        print("ffmpeg error:" + str(e))
+            # 生成した中間ファイルのWAVファイルを削除
+            if os.path.exists(wav_file):
+                os.remove(wav_file)
+            # 生成した中間ファイルのtemp.jpegを削除
+            if os.path.exists(jpeg_file):
+                os.remove(jpeg_file)
             
-    # Opusに変換する
-    if ffmpeg_error == 0:
-        subpro_result = subpro_opus(wav_file, output_file, bitrate, jpeg_file)
-        
-        # 生成した中間ファイルのWAVファイルを削除
-        if os.path.exists(wav_file):
-            os.remove(wav_file)
-        # 生成した中間ファイルのtemp.jpegを削除
-        if os.path.exists(jpeg_file):
-            os.remove(jpeg_file)
-        
-        if re.search("success:", subpro_result):    
-            insert_tags(output_file, tags)
-            return subpro_result
-        elif re.search("error:", subpro_result):
-            return subpro_result
-        else:
-            print("error:conversion opus")
+            if re.search("success:", subpro_result): 
+                insert_tags(output_file, tags)
+                return subpro_result
+            elif re.search("error:", subpro_result):
+                return subpro_result
+            else:
+                print("error:conversion opus")
+    except Exception as e:
+        return e
     
 def convert_opus_mt(file_path):
     """
@@ -248,12 +252,30 @@ def convert_opus_mt(file_path):
         なし
     """
     result = []
-    with Pool(max_prosess_size) as pool:
-        result_imap = pool.imap(func=convert_opus_func, iterable=file_path)
-        for i in tqdm(result_imap, total=len(file_path), desc="ファイルの進捗："):
-            result.append(i)
-    return result
+    pool = Pool(max_prosess_size, initializer=init_imap)
+    
+    try:
+        for i in tqdm(pool.imap(convert_opus_func,iterable=file_path), total=len(file_path), desc="ファイルの進捗："):
+            if isinstance(result, Exception):
+                #　エラー発生時の処理
+                print(f"プロセスタスクでエラーが発生しました：{i}")
+                result.append(i)
+            else:
+                result.append(i)
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt detected, terminating pool...")
+        pool.terminate()
+        pool.join()
+    else:
+        pool.close()
+        pool.join()
         
+    return result
+
+def init_imap():
+        # 子プロセスでKeyboardInterruptを無視する
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 def subpro_opus(input_wav, output_opus, bitrate="96", picture_pass = None):
     """
     Wave, AIFF, FLAC, Ogg/FLAC, or raw PCM ファイルを opus ファイルに変換する関数
